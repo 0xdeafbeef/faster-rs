@@ -276,6 +276,7 @@ impl FasterKv {
         unsafe {
             let c_guid = ffi::faster_start_session(self.faster_t);
             let rust_str = CStr::from_ptr(c_guid).to_str().unwrap().to_owned();
+            ffi::faster_free_session(c_guid);
             rust_str
         }
     }
