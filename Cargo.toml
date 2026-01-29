@@ -2,7 +2,7 @@
 name = "faster-rs"
 version = "0.11.0"
 authors = ["Max Meldrum <mmeldrum@kth.se>", "Matthew Brookes <mbrookes1304@gmail.com>"]
-edition = "2018"
+edition = "2024"
 keywords = ["concurrent", "embedded", "key-value-store"]
 description = "Rust wrapper for FASTER by Microsoft Research"
 repository = "https://github.com/faster-rs/faster-rs"
@@ -10,6 +10,7 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
+bon = "3.8.2"
 libc = "0.2"
 libfaster-sys = { path = "libfaster-sys", version = "0.11.0" }
 linux-futex = "1.0.0"

@@ -1,6 +1,6 @@
 extern crate faster_rs;
 
-use faster_rs::{status, FasterKv, FasterKvBuilder};
+use faster_rs::{status, FasterKv, FasterKvConfig};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::convert::TryInto;
@@ -93,12 +93,16 @@ fn repro_disk_read_after_flush_random_reads() {
     let tmp_dir = TempDir::new().unwrap();
     let dir = tmp_dir.path().to_str().unwrap();
 
-    let mut builder = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE);
-    builder
-        .with_disk(dir)
-        .with_log_mutable_fraction(LOG_MUTABLE_FRACTION)
-        .set_pre_allocate_log(true);
-    let store = Arc::new(builder.build().unwrap());
+    let store = Arc::new(
+        FasterKvConfig::builder()
+            .table_size(TABLE_SIZE)
+            .log_size(LOG_SIZE)
+            .storage_path(dir.to_owned())
+            .log_mutable_fraction(LOG_MUTABLE_FRACTION)
+            .pre_allocate_log(true)
+            .build()
+            .unwrap(),
+    );
 
     let mut serial = 0u64;
     store.start_session();

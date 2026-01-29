@@ -48,9 +48,11 @@ fn main() {
 }
 
 fn populate() {
-    if let Ok(store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE)
-        .with_disk(STORAGE_DIR)
-        .set_pre_allocate_log(true)
+    if let Ok(store) = FasterKvConfig::builder()
+        .table_size(TABLE_SIZE)
+        .log_size(LOG_SIZE)
+        .storage_path(STORAGE_DIR.to_owned())
+        .pre_allocate_log(true)
         .build()
     {
         // Populate Store
@@ -88,9 +90,11 @@ fn populate() {
 
 fn recover(token: String) {
     println!("Attempting to recover");
-    if let Ok(recover_store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE)
-        .with_disk(STORAGE_DIR)
-        .set_pre_allocate_log(true)
+    if let Ok(recover_store) = FasterKvConfig::builder()
+        .table_size(TABLE_SIZE)
+        .log_size(LOG_SIZE)
+        .storage_path(STORAGE_DIR.to_owned())
+        .pre_allocate_log(true)
         .build()
     {
         match recover_store.recover(token.clone(), token.clone()) {

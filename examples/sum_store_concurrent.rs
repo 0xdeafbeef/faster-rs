@@ -55,7 +55,12 @@ fn main() {
 }
 
 fn populate(num_threads: usize) {
-    if let Ok(store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE).with_disk(STORAGE_DIR).build() {
+    if let Ok(store) = FasterKvConfig::builder()
+        .table_size(TABLE_SIZE)
+        .log_size(LOG_SIZE)
+        .storage_path(STORAGE_DIR.to_owned())
+        .build()
+    {
         let store = Arc::new(store);
         let mut threads = vec![];
         let num_active_threads = Arc::new(AtomicUsize::new(0));
@@ -128,7 +133,12 @@ fn populate(num_threads: usize) {
 
 fn recover(token: String) {
     println!("Attempting to recover");
-    if let Ok(store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE).with_disk(STORAGE_DIR).build() {
+    if let Ok(store) = FasterKvConfig::builder()
+        .table_size(TABLE_SIZE)
+        .log_size(LOG_SIZE)
+        .storage_path(STORAGE_DIR.to_owned())
+        .build()
+    {
         match store.recover(token.clone(), token.clone()) {
             Ok(rec) => {
                 println!("Recover version: {}", rec.version);

@@ -6,7 +6,7 @@ mod faster_error;
 pub mod status;
 mod util;
 
-pub use crate::builder::FasterKvBuilder;
+pub use crate::builder::{FasterKvConfig, HlogCompactionConfig, ReadCacheConfig};
 pub use crate::faster_error::FasterError;
 use crate::util::*;
 use linux_futex::{Futex, Private};
@@ -21,17 +21,19 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 #[cfg(not(target_os = "linux"))]
 compile_error!("faster-rs raw-bytes API requires Linux futex support");
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// # Safety
 /// Caller must pass a pointer previously allocated by `Box<[u8]>` with the given length.
 pub unsafe extern "C" fn deallocate_vec(vec: *mut u8, length: u64) {
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-        vec,
-        length as usize,
-    )));
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            vec,
+            length as usize,
+        )));
+    }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// # Safety
 /// Caller must treat the returned pointer as a Rust-owned allocation and free it with `deallocate_vec`.
 pub unsafe extern "C" fn faster_alloc_vec(length: u64) -> *mut u8 {
@@ -39,19 +41,21 @@ pub unsafe extern "C" fn faster_alloc_vec(length: u64) -> *mut u8 {
     Box::into_raw(bytes) as *mut u8
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// # Safety
 /// Caller must initialize all fields before use and free it with `Box::from_raw`.
 pub unsafe extern "C" fn faster_alloc_checkpoint_result() -> *mut ffi::faster_checkpoint_result {
-    let result = Box::new(MaybeUninit::<ffi::faster_checkpoint_result>::zeroed().assume_init());
+    let result =
+        unsafe { Box::new(MaybeUninit::<ffi::faster_checkpoint_result>::zeroed().assume_init()) };
     Box::into_raw(result)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// # Safety
 /// Caller must initialize all fields before use and free it with `Box::from_raw`.
 pub unsafe extern "C" fn faster_alloc_recover_result() -> *mut ffi::faster_recover_result {
-    let result = Box::new(MaybeUninit::<ffi::faster_recover_result>::zeroed().assume_init());
+    let result =
+        unsafe { Box::new(MaybeUninit::<ffi::faster_recover_result>::zeroed().assume_init()) };
     Box::into_raw(result)
 }
 
@@ -67,7 +71,7 @@ pub unsafe extern "C" fn read_callback(
     if target.is_null() {
         return;
     }
-    let slot = &*(target as *const ReadSlot);
+    let slot = unsafe { &*(target as *const ReadSlot) };
     if status == status::OK.into() {
         if length > 0 && value.is_null() {
             slot.status.store(status::ABORTED.into(), Ordering::Release);
@@ -78,7 +82,7 @@ pub unsafe extern "C" fn read_callback(
             slot.len.store(0, Ordering::Release);
             slot.status.store(status, Ordering::Release);
         } else {
-            let bytes = std::slice::from_raw_parts(value, length as usize)
+            let bytes = unsafe { std::slice::from_raw_parts(value, length as usize) }
                 .to_vec()
                 .into_boxed_slice();
             let ptr = Box::into_raw(bytes) as *mut u8;
@@ -172,13 +176,17 @@ const STATE_DONE: u32 = 1;
 const STATE_DROPPED: u32 = 2;
 
 unsafe fn free_slot(slot: *mut ReadSlot) {
-    let slot_ref = &*slot;
+    let slot_ref = unsafe { &*slot };
     let ptr = slot_ref.buffer.load(Ordering::Acquire);
     let len = slot_ref.len.load(Ordering::Acquire);
     if !ptr.is_null() {
-        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        }
     }
-    drop(Box::from_raw(slot));
+    unsafe {
+        drop(Box::from_raw(slot));
+    }
 }
 
 pub struct FasterKv {
@@ -487,7 +495,9 @@ impl FasterKv {
 
 impl Default for FasterKv {
     fn default() -> Self {
-        FasterKvBuilder::new(1 << 15, 1024 * 1024 * 1024)
+        FasterKvConfig::builder()
+            .table_size(1 << 15)
+            .log_size(1024 * 1024 * 1024)
             .build()
             .unwrap()
     }
