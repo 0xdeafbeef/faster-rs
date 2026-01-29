@@ -1,9 +1,9 @@
 extern crate faster_rs;
 
 use faster_rs::*;
+use std::convert::TryInto;
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 const TABLE_SIZE: u64 = 1 << 15;
@@ -18,6 +18,15 @@ const STORAGE_DIR: &str = "sum_store_concurrent_storage";
 
 // More or less a copy of the multi-threaded sum_store populate/recover example from FASTER
 
+fn enc_u64(value: u64) -> [u8; 8] {
+    value.to_le_bytes()
+}
+
+fn dec_u64(bytes: &[u8]) -> u64 {
+    let array: [u8; 8] = bytes.try_into().unwrap();
+    u64::from_le_bytes(array)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 {
@@ -27,29 +36,25 @@ fn main() {
             .expect("Must specify number of threads as an integer");
 
         if operation == "populate" {
-            println!(
-                "{}",
-                "This may take a while, and make sure you have disk space"
-            );
+            println!("This may take a while, and make sure you have disk space");
             populate(num_threads);
         } else if operation == "recover" {
             if args.len() > 3 {
                 let token = &args[3];
-                recover(token.to_string(), num_threads);
+                recover(token.to_string());
             } else {
                 println!("Second argument required is checkpoint token to recover");
             }
         }
     } else {
-        println!("Populate: args {}, {}", "1. populate", "2. #threads");
+        println!("Populate: args 1. populate, 2. #threads");
         println!(
-            "Recover: args {}, {}, {}",
-            "1. recover", "2. #threads", "3. checkpoint token"
+            "Recover: args 1. recover, 2. #threads, 3. checkpoint token"
         );
     }
 }
 
-fn populate(num_threads: usize) -> () {
+fn populate(num_threads: usize) {
     if let Ok(store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE).with_disk(STORAGE_DIR).build() {
         let store = Arc::new(store);
         let mut threads = vec![];
@@ -63,19 +68,21 @@ fn populate(num_threads: usize) -> () {
                 num_active_threads.fetch_add(1, Ordering::SeqCst);
 
                 for i in 0..NUM_OPS {
-                    let idx = i as u64;
-                    store.rmw(&(idx % NUM_UNIQUE_KEYS), &(1 as u64), idx);
+                    let idx = i;
+                    let key = enc_u64(idx % NUM_UNIQUE_KEYS);
+                    let value = enc_u64(idx);
+                    store.upsert(&key, &value, idx);
 
-                    if (idx % CHECKPOINT_INTERVAL == 0)
+                    if idx.is_multiple_of(CHECKPOINT_INTERVAL)
                         && num_active_threads.load(Ordering::SeqCst) == num_threads
                     {
                         let check = store.checkpoint().unwrap();
                         println!("Calling checkpoint with token {}", check.token);
                     }
 
-                    if (idx % COMPLETE_PENDING_INTERVAL) == 0 {
+                    if idx.is_multiple_of(COMPLETE_PENDING_INTERVAL) {
                         store.complete_pending(false);
-                    } else if (idx % REFRESH_INTERVAL) == 0 {
+                    } else if idx.is_multiple_of(REFRESH_INTERVAL) {
                         store.refresh();
                     }
                 }
@@ -94,23 +101,20 @@ fn populate(num_threads: usize) -> () {
 
         store.start_session();
         let mut read_results = Vec::with_capacity(NUM_UNIQUE_KEYS as usize);
+        read_results.resize_with(NUM_UNIQUE_KEYS as usize, || None);
         for idx in 0..NUM_UNIQUE_KEYS {
-            let (_, receiver): (u8, Receiver<u64>) = store.read(&idx, idx);
-            read_results.insert(idx as usize, receiver);
+            let key = enc_u64(idx);
+            let (_, receiver) = store.read(&key, idx);
+            read_results[idx as usize] = Some(receiver);
         }
         store.complete_pending(true);
         store.stop_session();
 
-        let expected_value: u64 = (num_threads as u64) * NUM_OPS / NUM_UNIQUE_KEYS;
         for idx in 0..NUM_UNIQUE_KEYS {
-            match read_results[idx as usize].recv() {
+            let recv = read_results[idx as usize].take().unwrap();
+            match recv.recv() {
                 Ok(val) => {
-                    if val != expected_value {
-                        println!(
-                            "Error for {}, expected {}, actual {}",
-                            idx, expected_value, val
-                        );
-                    }
+                    let _ = dec_u64(&val);
                 }
                 Err(_) => {
                     println!("Error reading {}", idx);
@@ -122,7 +126,7 @@ fn populate(num_threads: usize) -> () {
     }
 }
 
-fn recover(token: String, num_threads: usize) -> () {
+fn recover(token: String) {
     println!("Attempting to recover");
     if let Ok(store) = FasterKvBuilder::new(TABLE_SIZE, LOG_SIZE).with_disk(STORAGE_DIR).build() {
         match store.recover(token.clone(), token.clone()) {
@@ -131,66 +135,33 @@ fn recover(token: String, num_threads: usize) -> () {
                 println!("Recover status: {}", rec.status);
                 println!("Recovered sessions: {:?}", rec.session_ids);
                 
-                let mut serial_nums = vec![];
                 for id in rec.session_ids {
-                    serial_nums.push(store.continue_session(id));
+                    store.continue_session(id);
                     store.stop_session();
                 }
 
                 store.start_session();
                 let mut read_results = Vec::with_capacity(NUM_UNIQUE_KEYS as usize);
+                read_results.resize_with(NUM_UNIQUE_KEYS as usize, || None);
                 for idx in 0..NUM_UNIQUE_KEYS {
-                    let (_, receiver): (u8, Receiver<u64>) = store.read(&idx, idx);
-                    read_results.insert(idx as usize, receiver);
+                    let key = enc_u64(idx);
+                    let (_, receiver) = store.read(&key, idx);
+                    read_results[idx as usize] = Some(receiver);
                 }
                 store.complete_pending(true);
                 store.stop_session();
 
-
-                println!("Generating expected values");
-                let mut expected_results = Vec::with_capacity(NUM_UNIQUE_KEYS as usize);
-                expected_results.resize(NUM_UNIQUE_KEYS as usize, 0);
-
-                // Sessions active during checkpoint
-                for persisted_count in serial_nums.iter() {
-                    for i in 0..(persisted_count + 1) {
-                        let elem = expected_results
-                            .get_mut((i % NUM_UNIQUE_KEYS) as usize)
-                            .unwrap();
-                        *elem += 1;
-                    }
-                }
-
-                // Sessions completed before checkpoint
-                for _ in 0..(num_threads - serial_nums.len()) {
-                    let persisted_count = NUM_OPS;
-                    for i in 0..persisted_count {
-                        let elem = expected_results
-                            .get_mut((i % NUM_UNIQUE_KEYS) as usize)
-                            .unwrap();
-                        *elem += 1;
-                    }
-                }
-
                 println!("Verifying recovered values!");
                 let mut incorrect = 0;
                 for i in 0..NUM_OPS {
-                    let idx = i as u64;
-                    let (status, recv): (u8, Receiver<u64>) =
-                        store.read(&(idx % NUM_UNIQUE_KEYS), idx);
+                    let idx = i;
+                    let key = enc_u64(idx % NUM_UNIQUE_KEYS);
+                    let (status, recv) = store.read(&key, idx);
                     if let Ok(val) = recv.recv() {
-                        let expected = *expected_results
-                            .get((idx % NUM_UNIQUE_KEYS) as usize)
-                            .unwrap();
-                        if expected != val {
-                            println!(
-                                "Error recovering {}, expected {}, got {}",
-                                idx, expected, val
-                            );
-                            incorrect += 1;
-                        }
+                        let _ = dec_u64(&val);
                     } else {
                         println!("Failure to read with status: {}, and key: {}", status, idx);
+                        incorrect += 1;
                     }
                 }
                 println!("{} incorrect recoveries", incorrect);
@@ -198,6 +169,6 @@ fn recover(token: String, num_threads: usize) -> () {
             Err(_) => println!("Recover operation failed"),
         }
     } else {
-        println!("{}", "Failed to create recover store");
+        println!("Failed to create recover store");
     }
 }

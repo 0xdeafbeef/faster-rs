@@ -59,6 +59,11 @@ impl<'a> FasterKvBuilder<'a> {
                     ft
                 }
             };
+            if faster_t.is_null() {
+                return Err(FasterError::BuilderError(
+                    "faster_open_with_disk returned null",
+                ));
+            }
             Ok(FasterKv {
                 faster_t,
                 storage_dir,

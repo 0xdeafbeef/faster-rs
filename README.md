@@ -21,16 +21,16 @@ $ apt install -y g++-7 libaio-dev uuid-dev libtbb-dev
 *Make sure you clone the submodules as well*, this is best done by cloning with `git clone --recurse-submodules`.
 
 ## The interface
-This wrapper attempts to remain true to the original FASTER design by exposing a similar interface to that which is provided by the original C++ version. Users may define their own Key-Value types and provide custom logic for Read-Modify-Write operations.
+This wrapper exposes a simple raw-bytes API that mirrors the original FASTER design. Keys and values are passed as `AsRef<[u8]>`, so callers control serialization and schema evolution.
 
 
-The `Read`, `Upsert` and `RMW` operations all require a monotonic serial number to form the sequence of operations that will be persisted by FASTER. `Read` operations require a serial number so that at a CPR checkpoint boundary, FASTER guarantees that the reads before that point have accessed no data updates after the checkpoint. If persistence is not important, the serial number can safely be set to `1` for all operations (as is done in the examples above).
+The `Read` and `Upsert` operations require a monotonic serial number to form the sequence of operations that will be persisted by FASTER. `Read` operations require a serial number so that at a CPR checkpoint boundary, FASTER guarantees that the reads before that point have accessed no data updates after the checkpoint. If persistence is not important, the serial number can safely be set to `1` for all operations (as is done in the examples above).
 
 More information about Checkpointing and Recovery is provided below the following examples.
 
 ## A basic example
 
-The following example shows the creation of a FASTER Key-Value Store and basic operations on `u64` values.
+The following example shows the creation of a FASTER Key-Value Store and basic operations on `u64` values encoded as bytes.
 
 Try it out by running `cargo run --example basic`.
 
@@ -38,37 +38,41 @@ Try it out by running `cargo run --example basic`.
 extern crate faster_rs;
 
 use faster_rs::{status, FasterKv};
-use std::sync::mpsc::Receiver;
+use std::convert::TryInto;
+fn enc_u64(value: u64) -> [u8; 8] {
+    value.to_le_bytes()
+}
+
+fn dec_u64(bytes: &[u8]) -> u64 {
+    let array: [u8; 8] = bytes.try_into().unwrap();
+    u64::from_le_bytes(array)
+}
 
 fn main() {
     // Create a Key-Value Store
     let store = FasterKv::default();
     let key0: u64 = 1;
     let value0: u64 = 1000;
-    let modification: u64 = 5;
 
     // Upsert
     for i in 0..1000 {
-        let upsert = store.upsert(&(key0 + i), &(value0 + i), i);
+        let key = enc_u64(key0 + i);
+        let value = enc_u64(value0 + i);
+        let upsert = store.upsert(&key, &value, i);
         assert!(upsert == status::OK || upsert == status::PENDING);
-    }
-
-    // Read-Modify-Write
-    for i in 0..1000 {
-        let rmw = store.rmw(&(key0 + i), &(5 as u64), i + 1000);
-        assert!(rmw == status::OK || rmw == status::PENDING);
     }
 
     assert!(store.size() > 0);
 
     // Read
     for i in 0..1000 {
-        // Note: need to provide type annotation for the Receiver
-        let (read, recv): (u8, Receiver<u64>) = store.read(&(key0 + i), i);
+        let key = enc_u64(key0 + i);
+        let (read, recv) = store.read(&key, i);
         assert!(read == status::OK || read == status::PENDING);
         let val = recv.recv().unwrap();
-        assert_eq!(val, value0 + i + modification);
-        println!("Key: {}, Value: {}", key0 + i, val);
+        let value = dec_u64(&val);
+        assert_eq!(value, value0 + i);
+        println!("Key: {}, Value: {}", key0 + i, value);
     }
 
     // Clear used storage
@@ -80,33 +84,19 @@ fn main() {
 ```
 
 ## Using custom keys
-`struct`s that can be (de)serialised using [serde](https://crates.rs/crates/serde) are supported as keys. In order to use such a `struct`, it is necessary to derive the implementations of `Serializable` and `Deserializable` from `serde-derive`. All types implementing these two traits will automatically implement `FasterKey` and thus be usable as a Key.
+Keys are arbitrary byte sequences. If you have a custom type, serialize it to bytes before calling `upsert` or `read`.
 
-The following example shows a basic struct being used as a key. Try it out by running `cargo run --example custom_keys`.
+The following example shows custom bytes being used as a key. Try it out by running `cargo run --example custom_keys`.
 
 ```rust,no-run
 extern crate faster_rs;
-extern crate serde_derive;
-
 use faster_rs::{status, FasterKv};
-use serde_derive::{Deserialize, Serialize};
-use std::sync::mpsc::Receiver;
-
-// Note: Debug annotation is just for printing later
-#[derive(Serialize, Deserialize, Debug)]
-struct MyKey {
-    foo: String,
-    bar: String,
-}
-
+use std::convert::TryInto;
 fn main() {
     // Create a Key-Value Store
     let store = FasterKv::default();
-    let key = MyKey {
-        foo: String::from("Hello"),
-        bar: String::from("World"),
-    };
-    let value: u64 = 1;
+    let key = b"hello-world".to_vec();
+    let value = vec![1u8, 2, 3, 4];
 
     // Upsert
     let upsert = store.upsert(&key, &value, 1);
@@ -114,11 +104,10 @@ fn main() {
 
     assert!(store.size() > 0);
 
-    // Note: need to provide type annotation for the Receiver
-    let (read, recv): (u8, Receiver<u64>) = store.read(&key, 1);
+    let (read, recv) = store.read(&key, 1);
     assert!(read == status::OK || read == status::PENDING);
     let val = recv.recv().unwrap();
-    println!("Key: {:?}, Value: {}", key, val);
+    println!("Key: {:?}, Value: {:?}", key, val);
 
     // Clear used storage
     match store.clean_storage() {
@@ -130,35 +119,19 @@ fn main() {
 
 
 ## Using custom values
-`struct`s that can be (de)serialised using [serde](https://crates.rs/crates/serde) are supported as values. In order to use such a `struct`, it is necessary to derive the implementations of `Serializable` and `Deserializable` from `serde-derive`.
+Values are arbitrary byte sequences. If you have a custom type, serialize it to bytes before calling `upsert`, and deserialize the returned bytes from `read`.
 
-In order to use Read-Modify-Write operations on a custom type, it is also necessary to implement the `FasterRmw` trait which exposes an `rmw()` function. This function can be used to implement custom logic for Read-Modify-Write operations.
-
-The following example shows a basic struct being used as a value. Try it out by running `cargo run --example custom_values`.
+The following example shows custom bytes being used as a value. Try it out by running `cargo run --example custom_values`.
 
 ```rust,no_run
 extern crate faster_rs;
-extern crate serde_derive;
-
 use faster_rs::{status, FasterKv};
-use serde_derive::{Deserialize, Serialize};
-use std::sync::mpsc::Receiver;
-
-// Note: Debug annotation is just for printing later
-#[derive(Serialize, Deserialize, Debug)]
-struct MyValue {
-    foo: String,
-    bar: String,
-}
-
+use std::convert::TryInto;
 fn main() {
     // Create a Key-Value Store
     let store = FasterKv::default();
-    let key: u64 = 1;
-    let value = MyValue {
-        foo: String::from("Hello"),
-        bar: String::from("World"),
-    };
+    let key = b"primary-key".to_vec();
+    let value = b"hello-world".to_vec();
 
     // Upsert
     let upsert = store.upsert(&key, &value, 1);
@@ -166,11 +139,10 @@ fn main() {
 
     assert!(store.size() > 0);
 
-    // Note: need to provide type annotation for the Receiver
-    let (read, recv): (u8, Receiver<MyValue>) = store.read(&key, 1);
+    let (read, recv) = store.read(&key, 1);
     assert!(read == status::OK || read == status::PENDING);
     let val = recv.recv().unwrap();
-    println!("Key: {}, Value: {:?}", key, val);
+    println!("Key: {:?}, Value: {:?}", key, val);
 
     // Clear used storage
     match store.clean_storage() {
@@ -179,13 +151,6 @@ fn main() {
     }
 }
 ```
-
-## Out-of-the-box implementations of `FasterRmw`
-Several types already implement `FasterRmw` along with providing Read-Modify-Write logic. The implementations can be found in `src/impls.rs` but their RMW logic is summarised here:
-* Numeric types use addition
-* Bools and Chars replace old value for new value
-* Strings and Vec<T> append modification
-* HashSet<T> performs union operation
 
 ## Checkpoint and Recovery
 FASTER's fault tolerance is provided by [Concurrent Prefix Recovery](https://www.microsoft.com/en-us/research/uploads/prod/2019/01/cpr-sigmod19.pdf) (CPR). It provides the following semantics:

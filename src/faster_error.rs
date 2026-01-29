@@ -13,7 +13,7 @@ pub enum FasterError<'a> {
 impl<'a> fmt::Display for FasterError<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FasterError::IOError(err) => write!(f, "{}", err.description()),
+            FasterError::IOError(err) => write!(f, "{err}"),
             FasterError::InvalidType => write!(f, "Cannot call method with in-memory FasterKv"),
             FasterError::RecoveryError => write!(f, "Failed to recover"),
             FasterError::CheckpointError => write!(f, "Checkpoint failed"),

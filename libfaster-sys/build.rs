@@ -64,6 +64,7 @@ fn main() {
     faster_bindgen();
 
     let dst = Config::new("FASTER/cc")
+        .define("CMAKE_POSITION_INDEPENDENT_CODE", "ON")
         .build_target("faster")
         .build();
 

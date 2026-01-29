@@ -5,11 +5,11 @@ extern crate regex;
 use faster_rs::FasterKv;
 use hwloc::{CpuSet, ObjectType, Topology, CPUBIND_THREAD};
 use regex::Regex;
+use std::convert::TryInto;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::prelude::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,6 @@ const K_THREAD_STACK_SIZE: usize = 4 * 1024 * 1024;
 pub enum Operation {
     Read,
     Upsert,
-    Rmw,
 }
 
 fn cpuset_for_core(topology: &Topology, idx: usize) -> CpuSet {
@@ -76,12 +75,17 @@ pub fn read_upsert5050(key: usize) -> Operation {
     }
 }
 
-pub fn rmw_100(_key: usize) -> Operation {
-    Operation::Rmw
-}
-
 pub fn upsert_100(_key: usize) -> Operation {
     Operation::Upsert
+}
+
+fn enc_u64(value: u64) -> [u8; 8] {
+    value.to_be_bytes()
+}
+
+fn dec_u64(bytes: &[u8]) -> u64 {
+    let array: [u8; 8] = bytes.try_into().unwrap();
+    u64::from_be_bytes(array)
 }
 
 pub fn load_files(load_file: &str, run_file: &str) -> (Vec<u64>, Vec<u64>) {
@@ -146,6 +150,7 @@ pub fn populate_store(store: &Arc<FasterKv>, keys: &Arc<Vec<u64>>, num_threads: 
     let topo = Arc::new(Mutex::new(Topology::new()));
     let idx = Arc::new(AtomicUsize::new(0));
     let mut threads = vec![];
+    let value = enc_u64(42);
 
     for thread_idx in 0..num_threads {
         let store = Arc::clone(store);
@@ -174,7 +179,8 @@ pub fn populate_store(store: &Arc<FasterKv>, keys: &Arc<Vec<u64>>, num_threads: 
                             store.complete_pending(false);
                         }
                     }
-                    store.upsert(&*keys.get(i as usize).unwrap(), &42, i as u64);
+                    let key = enc_u64(*keys.get(i as usize).unwrap());
+                    store.upsert(&key, &value, i as u64);
                 }
                 chunk_idx = idx.fetch_add(K_CHUNK_SIZE, Ordering::SeqCst);
             }
@@ -223,7 +229,6 @@ pub fn run_benchmark<F: Fn(usize) -> Operation + Send + Copy + 'static>(
 
                     let mut reads = 0;
                     let mut upserts = 0;
-                    let mut rmws = 0;
 
                     let _session = store.start_session();
 
@@ -246,17 +251,16 @@ pub fn run_benchmark<F: Fn(usize) -> Operation + Send + Copy + 'static>(
                             }
                             match op_allocator(i) {
                                 Operation::Read => {
-                                    let (_, _): (u8, Receiver<i32>) =
-                                        store.read(&*keys.get(i).unwrap(), 1);
+                                    let key = enc_u64(*keys.get(i).unwrap());
+                                    let (_, recv) = store.read(&key, 1);
+                                    let _ = recv.recv().map(|val| dec_u64(&val));
                                     reads += 1;
                                 }
                                 Operation::Upsert => {
-                                    store.upsert(&*keys.get(i).unwrap(), &42, 1);
+                                    let key = enc_u64(*keys.get(i).unwrap());
+                                    let value = enc_u64(42);
+                                    store.upsert(&key, &value, 1);
                                     upserts += 1;
-                                }
-                                Operation::Rmw => {
-                                    store.rmw(&*keys.get(i).unwrap(), &5, 1);
-                                    rmws += 1;
                                 }
                             }
                         }
@@ -267,15 +271,14 @@ pub fn run_benchmark<F: Fn(usize) -> Operation + Send + Copy + 'static>(
                     let duration = Instant::now().duration_since(start);
 
                     println!(
-                        "Thread {} completed {} reads, {} upserts and {} rmws in {}ms",
+                        "Thread {} completed {} reads, {} upserts in {}ms",
                         thread_id,
                         reads,
                         upserts,
-                        rmws,
                         duration.as_millis()
                     );
 
-                    (reads, upserts, rmws, duration.as_nanos())
+                    (reads, upserts, duration.as_nanos())
                 })
                 .unwrap(),
         )
@@ -298,22 +301,19 @@ pub fn run_benchmark<F: Fn(usize) -> Operation + Send + Copy + 'static>(
 
     done.store(true, Ordering::SeqCst);
 
-    let mut total_counts = (0, 0, 0, 0);
+    let mut total_counts = (0, 0, 0);
     for t in threads {
-        let (reads, upserts, rmws, duration) = t.join().expect("Something went wrong in a thread");
+        let (reads, upserts, duration) = t.join().expect("Something went wrong in a thread");
         total_counts.0 += reads;
         total_counts.1 += upserts;
-        total_counts.2 += rmws;
-        total_counts.3 += duration;
+        total_counts.2 += duration;
     }
 
     println!(
-        "Finished benchmark: {} checkpoints, {} reads, {} writes, {} rmws. {} ops/second/thread",
+        "Finished benchmark: {} checkpoints, {} reads, {} writes. {} ops/second/thread",
         num_checkpoints,
         total_counts.0,
         total_counts.1,
-        total_counts.2,
-        (total_counts.0 + total_counts.1 + total_counts.2)
-            / (total_counts.3 as usize / K_NANOS_PER_SECOND)
+        (total_counts.0 + total_counts.1) / (total_counts.2 as usize / K_NANOS_PER_SECOND)
     )
 }

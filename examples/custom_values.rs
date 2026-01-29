@@ -1,25 +1,10 @@
 extern crate faster_rs;
-extern crate serde_derive;
-
 use faster_rs::{status, FasterKv};
-use serde_derive::{Deserialize, Serialize};
-use std::sync::mpsc::Receiver;
-
-// Note: Debug annotation is just for printing later
-#[derive(Serialize, Deserialize, Debug)]
-struct MyValue {
-    foo: String,
-    bar: String,
-}
-
 fn main() {
     // Create a Key-Value Store
     let store = FasterKv::default();
-    let key: u64 = 1;
-    let value = MyValue {
-        foo: String::from("Hello"),
-        bar: String::from("World"),
-    };
+    let key = b"primary-key".to_vec();
+    let value = b"hello-world".to_vec();
 
     // Upsert
     let upsert = store.upsert(&key, &value, 1);
@@ -27,11 +12,10 @@ fn main() {
 
     assert!(store.size() > 0);
 
-    // Note: need to provide type annotation for the Receiver
-    let (read, recv): (u8, Receiver<MyValue>) = store.read(&key, 1);
+    let (read, recv) = store.read(&key, 1);
     assert!(read == status::OK || read == status::PENDING);
     let val = recv.recv().unwrap();
-    println!("Key: {}, Value: {:?}", key, val);
+    println!("Key: {:?}, Value: {:?}", key, val);
 
     // Clear used storage
     match store.clean_storage() {

@@ -44,7 +44,6 @@ fn main() {
                 )
                 .arg(Arg::with_name("workload").required(true).possible_values(&[
                     "read_upsert_50_50",
-                    "rmw_100",
                     "upsert_100",
                 ])),
         )
@@ -91,9 +90,8 @@ fn main() {
             .expect("Workload not specified");
         let op_allocator = match workload {
             "read_upsert_50_50" => read_upsert5050,
-            "rmw_100" => rmw_100,
             "upsert_100" => upsert_100,
-            _ => panic!("Unexpected workload specified. Options are: read_upsert_50_50, rmw_100"),
+            _ => panic!("Unexpected workload specified. Options are: read_upsert_50_50, upsert_100"),
         };
 
         let table_size: u64 = 134217728;
