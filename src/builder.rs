@@ -48,6 +48,10 @@ pub struct HlogCompactionConfig {
     pub max_compacted_size: u64,
     /// Total log size budget in bytes for triggering compaction.
     ///
+    /// This is independent of [`FasterKvConfig::log_size`]. Setting it too low (for example equal
+    /// to `log_size`) can cause foreground operations to participate in compaction when the log
+    /// reaches the budget.
+    ///
     /// See [Configuring the Hybrid Log](https://microsoft.github.io/FASTER/docs/fasterkv-tuning/#configuring-the-hybrid-log).
     pub hlog_size_budget: u64,
     /// Number of threads to use for compaction.

@@ -17,6 +17,7 @@ use std::fs;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("faster-rs raw-bytes API requires Linux futex support");
@@ -302,6 +303,46 @@ impl FasterKv {
         unsafe { ffi::faster_size(self.faster_t) }
     }
 
+    pub fn num_active_sessions(&self) -> u32 {
+        unsafe { ffi::faster_num_active_sessions(self.faster_t) }
+    }
+
+    pub fn auto_compaction_scheduled(&self) -> bool {
+        unsafe { ffi::faster_auto_compaction_scheduled(self.faster_t) }
+    }
+
+    pub fn hlog_max_size_reached(&self) -> bool {
+        unsafe { ffi::faster_hlog_max_size_reached(self.faster_t) }
+    }
+
+    pub fn hlog_begin_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_begin_address(self.faster_t) }
+    }
+
+    pub fn hlog_tail_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_tail_address(self.faster_t) }
+    }
+
+    pub fn hlog_head_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_head_address(self.faster_t) }
+    }
+
+    pub fn hlog_safe_head_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_safe_head_address(self.faster_t) }
+    }
+
+    pub fn hlog_read_only_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_read_only_address(self.faster_t) }
+    }
+
+    pub fn hlog_safe_read_only_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_safe_read_only_address(self.faster_t) }
+    }
+
+    pub fn hlog_flushed_until_address(&self) -> u64 {
+        unsafe { ffi::faster_hlog_flushed_until_address(self.faster_t) }
+    }
+
     pub fn checkpoint(&self) -> Result<CheckPoint, FasterError<'_>> {
         if self.storage_dir.is_none() {
             return Err(FasterError::InvalidType);
@@ -459,9 +500,24 @@ impl FasterKv {
         unsafe { ffi::faster_stop_session(self.faster_t) }
     }
 
+    /// Advance the epoch for this thread's active session.
+    ///
+    /// FASTER requires periodic refresh calls from each thread that has an active session. If
+    /// refresh calls are missing, safe addresses can stall which can cause auto-compaction to make
+    /// little progress and, once the log hits its size budget, force foreground operations to
+    /// participate in compaction.
+    ///
+    /// See [Configuring the Hybrid Log](https://microsoft.github.io/FASTER/docs/fasterkv-tuning/#configuring-the-hybrid-log).
     pub fn refresh(&self) {
         unsafe {
             ffi::faster_refresh_session(self.faster_t);
+        }
+    }
+
+    pub fn refresh_if_due(&self, last: &mut Instant, every: Duration) {
+        if last.elapsed() >= every {
+            self.refresh();
+            *last = Instant::now();
         }
     }
 
